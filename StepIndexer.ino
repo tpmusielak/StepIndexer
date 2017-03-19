@@ -18,11 +18,23 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 //  First, include some files for the LCD display, and its motor
 
 #include <Arduino.h>
+#include <Stepper.h>
+#include <TimerOne.h>
+
+#define I2C_LCD
+#define SERIAL_INPUT
+
+#ifndef I2C_LCD
 #include <LiquidCrystal.h>
+#endif // !I2C_LCD
+
+#ifdef I2C_LCD
+#include <LiquidCrystal_I2C.h>
+#endif // DEBUG
 
 //  Next define your parameters about your motor and gearing
 
-#define StepsPerRevolution 200  // Change this to represent the number of steps
+#define StepsPerRevolution 513  // Change this to represent the number of steps
 //   it takes the motor to do one full revolution
 //   200 is the result of a 1.8 degree per step motor
 #define Microsteps 8            // Depending on your stepper driver, it may support
@@ -58,9 +70,6 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #define moveangle 10
 #define movesteps 11
 
-//#define Celsius 1         // define only one of these, please!
-#define Fahrenheit 1        // Fahrenheit is default
-
 #define Temperature_C 1
 #define Temperature_F 2
 
@@ -84,7 +93,13 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 
 // create lcd display construct
 
-LiquidCrystal lcd(8, 9, 4, 5, 6, 7);  //Data Structure and Pin Numbers for the LCD/Keypad
+#ifndef I2C_LCD
+//LiquidCrystal lcd(8, 9, 4, 5, 6, 7);  //Data Structure and Pin Numbers for the LCD/Keypad
+#endif // !I2C_LCD
+
+#ifdef I2C_LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // set the LCD address to 0x27 for a 16 chars and 2 line display
+#endif // I2C_LCD
 
 // define LCD/Keypad buttons
 
@@ -121,13 +136,21 @@ int    gearratioindex = 0;      // the first array element starts with 0 and is 
 byte temperatureMode = Temperature_C;
 byte temperatureSymbol = DEG_C_SYMBOL;
 
-struct IndexerSettings
-{
+bool drawScreenNeeded = true;
+volatile int lastKey = NO_KEY;
 
-};
+Stepper stepper(StepsPerRevolution, 7, 6, 5, 4);
+
+volatile int dirToGo = 0;
+volatile unsigned long stepsToGo = 0;
 
 void setup()
 {
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(9600);  
+
+  stepper.setSpeed(1000);
+
   //  Create some custom characters for the lcd display
   byte c_CW[8] = { 0b01101,0b10011,0b10111,0b10000,0b10000,0b10000,0b10001,0b01110 }; // Clockwise
   byte c_CCW[8] = { 0b10110,0b11001,0b11101,0b00001,0b00001,0b00001,0b10001,0b01110 }; // CounterClockWise
@@ -135,18 +158,41 @@ void setup()
   byte c_DegreeF[8] = { 0b01000,0b10100,0b01000,0b00111,0b00100,0b00110,0b00100,0b00100 }; //  degreeF
   byte c_DegreeC[8] = { 0b01000,0b10100,0b01011,0b00101,0b00100,0b00100,0b00101,0b00011 }; //  degreeC
 
+  lcd.init();
+  lcd.clear();
+  lcd.backlight();  
+    
   lcd.createChar(CW_SYMBOL, c_CW);
   lcd.createChar(CCW_SYMBOL, c_CCW);
   lcd.createChar(DEG_C_SYMBOL, c_DegreeC);
   lcd.createChar(DEG_F_SYMBOL, c_DegreeF);
-
+  
   // begin program
 
   motorSteps = (gear_ratio_top_array[gearratioindex] * Microsteps * StepsPerRevolution) / gear_ratio_bottom_array[gearratioindex];
+  
+  printIntroScreen();
+  delay(1500);                        // wait a few secs
+  lcd.clear();
+  
+  pinMode(motorSTEPpin, OUTPUT);     // set pin 3 to output
+  pinMode(motorDIRpin, OUTPUT);      // set pin 2 to output
+  pinMode(motorENABLEpin, OUTPUT);   // set pin 11 to output
+  //digitalWrite(motorENABLEpin, HIGH); // power up the motor and leave it on  
+
+  Timer1.initialize(pulsewidth * 1000);
+  Timer1.stop();
+  Timer1.attachInterrupt(actionMotor);
+
+  displayMainMenu();
+}                                    // end of setup function
+
+void printIntroScreen()
+{
   lcd.begin(16, 2);
   lcd.clear();
   lcd.setCursor(0, 0);                 // display flash screen
-  lcd.print("Step Indexer 2.3");
+  lcd.print("Step Indexer 3.0");
   lcd.setCursor(0, 1);
   lcd.print("Ratio =");
   lcd.setCursor(8, 1);
@@ -154,260 +200,218 @@ void setup()
   lcd.setCursor(12, 1);
   lcd.print(":");
   lcd.print(gear_ratio_bottom_array[gearratioindex]);
-  delay(1500);                        // wait a few secs
-  lcd.clear();
-
-  pinMode(motorSTEPpin, OUTPUT);     // set pin 3 to output
-  pinMode(motorDIRpin, OUTPUT);      // set pin 2 to output
-  pinMode(motorENABLEpin, OUTPUT);   // set pin 11 to output
-  digitalWrite(motorENABLEpin, HIGH); // power up the motor and leave it on
-
-  displayScreen(cur_mode);           // put up initial menu screen
-
-}                                    // end of setup function
+}
 
 void loop()                          // main loop services keystrokes
-{
-  int exitflag;
-  int numjogsteps;
+{ 
+  int key = getKey();
 
-  displayScreen(cur_mode);            // display the screen
-  cur_key = getRealKey();           // grab a keypress
   switch (cur_mode)                    // execute the keystroke
   {
   case mainmenu:                    // main menu
-    switch (cur_key)
-    {
-    case UP_KEY:
-      mode_select++;
-      if (mode_select > numModes)  // wrap around menu
-        mode_select = 1;
-      break;
-    case DOWN_KEY:
-      mode_select--;
-      if (mode_select < 1)         // wrap around menu
-        mode_select = numModes;
-      break;
-    case LEFT_KEY:           // left and right keys do nothing in main menu
-      break;
-    case RIGHT_KEY:
-      break;
-    case SELECT_KEY:         // user has picked a menu item
-      cur_mode = mode_select;
-      break;
-    }
+    doMainMenu(key);
     break;
   case tempmode:                    // call temps
-    dotempmode(cur_key);
-    cur_mode = mainmenu;
+    doTempMode(key);    
     break;
   case stepmode:                    // call steps
-    doStepMode(cur_key);
-    cur_mode = mainmenu;
+    doStepMode(key);    
     break;
   case anglemode:                   // call angles
-    doAngleMode(cur_key);
-    cur_mode = mainmenu;
+    doAngleMode(key);    
     break;
   case runmode:                     // call run  
-    doRunMode(cur_key);
-    cur_mode = mainmenu;
+    doRunMode(key);    
     break;
   case jogmode:                    // call jog
-    doJogMode(cur_key);
-    cur_mode = mainmenu;
+    doJogMode(key);    
     break;
   case ratiomode:                 // call ratio
-    doRatioMode(cur_key);
-    cur_mode = mainmenu;
+    doRatioMode(key);    
     break;
-  } // end of mode switch
-}   // end of main loop
-
-void doStepMode(int tmp_key)
-{
-  int breakflag = 0;
-  displayScreen(stepmode);
-  while (breakflag == 0)
-  {
-    switch (tmp_key)
-    {
-    case UP_KEY:
-      num_divisions++;
-      break;
-    case DOWN_KEY:
-      if (num_divisions > 0)
-        num_divisions--;
-      break;
-    case LEFT_KEY:
-      cur_dir = CCW;
-      stepsperdiv = (motorSteps / num_divisions);
-      moveMotor(stepsperdiv, cur_dir, movesteps);
-      delay(ScreenPause);   //pause to inspect the screen
-      cur_pos--;
-      if (cur_pos == (-num_divisions))
-        cur_pos = 0;
-      break;
-    case RIGHT_KEY:
-      cur_dir = CW;
-      stepsperdiv = (motorSteps / num_divisions);
-      moveMotor(stepsperdiv, cur_dir, movesteps);
-      delay(ScreenPause);   // pause to inspect the screen
-      cur_pos++;
-      if (cur_pos == num_divisions)
-        cur_pos = 0;
-      break;
-    case SELECT_KEY:
-      cur_pos = 0;                       // reset position
-      num_divisions = 0;                 // reset number of divisions
-      return;
-      break;
-    }
-    displayScreen(stepmode);
-    tmp_key = getRealKey();
-  }
-  return;
-}
-void doAngleMode(int tmp_key)
-{
-  int breakflag = 0;
-  displayScreen(anglemode);
-  while (breakflag == 0)
-  {
-    switch (tmp_key)
-    {
-    case UP_KEY:
-      if ((cur_angle + AngleIncrement) < 361)
-        cur_angle += AngleIncrement;
-      break;
-    case DOWN_KEY:
-      if ((cur_angle - AngleIncrement) > -1)
-        cur_angle -= AngleIncrement;
-      break;
-    case LEFT_KEY:
-      cur_dir = CCW;
-      stepsperdiv = ((motorSteps * cur_angle) / 360);
-      moveMotor(stepsperdiv, cur_dir, moveangle);
-      delay(ScreenPause);   //pause to inspect the screen
-      break;
-    case RIGHT_KEY:
-      cur_dir = CW;
-      stepsperdiv = ((motorSteps * cur_angle) / 360);
-      moveMotor(stepsperdiv, cur_dir, moveangle);
-      delay(ScreenPause);   //pause to inspect the screen
-      break;
-    case SELECT_KEY:
-      cur_angle = 0;                       // reset angle to default of zero
-      return;
-      break;
-    }
-    displayScreen(anglemode);
-    tmp_key = getRealKey();
-  }
-  return;
-}
-
-bool keyPressed()
-{
-  return analogRead(AnalogKeyPin) < 850;
-}
-
-void doRunMode(int tmp_key)
-{
-  bool breakflag = false;
-  delay(100);                              // wait for keybounce from user's selection
-  cur_dir = CW;                            // initially, clockwise
-  displayScreen(runmode);                  // show the screen
-
-  while (breakflag == false)               // cycle until Select Key sets flag
-  {
-    moveMotor(1, cur_dir, 0);              // move motor 1 step
-    if (keyPressed())                      // if a keypress is present       {
-    {
-      cur_key = getRealKey();              // then get it
-      switch (cur_key)                     // and honor it
-      {
-      case UP_KEY:                        // bump up the speed
-        if (motorspeeddelay >= SpeedDelayIncrement) {
-          motorspeeddelay -= SpeedDelayIncrement;
-          displayScreen(runmode);
-        }
-        break;
-      case DOWN_KEY:                      // bump down the speed
-        motorspeeddelay += SpeedDelayIncrement;
-        displayScreen(runmode);
-        break;
-      case LEFT_KEY:                      // set direction
-        cur_dir = CCW;
-        displayScreen(runmode);
-        break;
-      case RIGHT_KEY:                     // set other direction
-        cur_dir = CW;
-        displayScreen(runmode);
-        break;
-      case SELECT_KEY:                   // user wants to stop
-        motorspeeddelay = DefaultMotorSpeed;   // reset speed   
-        breakflag = 1;                   // fall through to exit
-      }
-    }
-  }
-}
-void dotempmode(int test_key)
-{
-  while (1)
-  {
-    if (test_key == SELECT_KEY) return;     // all we do here is wait for a select key
-    test_key = getRealKey();
-  }
-  return;                                   // to exit
-}
-
-void doJogMode(int tmp_key)
-{
-  bool breakflag = false;
-
-  numjogsteps = JogStepsIncrement;
-  while (breakflag == false)
-  {
-    if (breakflag == false)
-    {
-      displayScreen(jogmode);
-      tmp_key = getRealKey();
-    }
-    switch (tmp_key)
-    {
-      case UP_KEY:                          // bump the number of steps
-        numjogsteps += JogStepsIncrement;
-        break;
-      case DOWN_KEY:                        // reduce the number of steps
-        if (numjogsteps > JogStepsIncrement)
-          numjogsteps -= JogStepsIncrement;
-        break;
-      case LEFT_KEY:                        // step the motor CCW
-        moveMotor(numjogsteps, CCW, 0);
-        break;
-      case RIGHT_KEY:                       // step the motor CW
-        moveMotor(numjogsteps, CW, 0);
-        break;
-      case SELECT_KEY:                      // user want to quit
-        breakflag = true;
-        break;
-    }
   }
 
-  numjogsteps = JogStepsIncrement;
-  cur_mode = mainmenu;                 // go back to main menu
-  return;
+  if (key != NO_KEY)
+  {
+    displayScreen(cur_mode);
+  }
+}  
+
+
+void doMainMenu(int key)
+{ 
+  switch (key)
+  {
+  case LEFT_KEY:
+  case UP_KEY:
+    mode_select++;
+    if (mode_select > numModes)  // wrap around menu
+      mode_select = 1;      
+    break;
+  case RIGHT_KEY:
+  case DOWN_KEY:
+    mode_select--;
+    if (mode_select < 1)         // wrap around menu
+      mode_select = numModes;      
+    break;
+  case SELECT_KEY:         // user has picked a menu item
+    setMode(mode_select);      
+    break;
+  }
 }
 
-void doRatioMode(int tmp_key)
+void setMode(int mode)
 {
-  int breakflag = 0;
+  cur_mode = mode;
+  displayScreen(mode);  
+}
 
-  displayScreen(ratiomode);
-  for (; breakflag == 0;)
+void doStepMode(int key)
+{
+  switch (key)
   {
-    switch (tmp_key)
+  case UP_KEY:
+    num_divisions++;      
+    break;
+  case DOWN_KEY:
+    if (num_divisions > 0)
+      num_divisions--;      
+    break;
+  case LEFT_KEY:
+    cur_dir = CCW;
+    stepsperdiv = (motorSteps / num_divisions);
+    moveMotor(stepsperdiv, cur_dir, movesteps);
+    //delay(ScreenPause);   //pause to inspect the screen
+    cur_pos--;
+    if (cur_pos == (-num_divisions))
+      cur_pos = 0;      
+    break;
+  case RIGHT_KEY:
+    cur_dir = CW;
+    stepsperdiv = (motorSteps / num_divisions);
+    moveMotor(stepsperdiv, cur_dir, movesteps);
+    //delay(ScreenPause); // pause to inspect the screen
+    cur_pos++;
+    if (cur_pos == num_divisions)
+      cur_pos = 0;      
+    break;
+  case SELECT_KEY:
+    cur_pos = 0;       // reset position
+    num_divisions = 0; // reset number of divisions
+    returnToMenu();
+    return;
+  }
+}
+
+void returnToMenu()
+{
+  setMode(mainmenu);
+}
+
+void doAngleMode(int key)
+{
+  switch (key)
+  {
+  case UP_KEY:
+    if ((cur_angle + AngleIncrement) < 361)
+      cur_angle += AngleIncrement;
+    break;
+  case DOWN_KEY:
+    if ((cur_angle - AngleIncrement) > -1)
+      cur_angle -= AngleIncrement;
+    break;
+  case LEFT_KEY:
+    cur_dir = CCW;
+    stepsperdiv = ((motorSteps * cur_angle) / 360);
+    moveMotor(stepsperdiv, cur_dir, moveangle);
+    delay(ScreenPause);   //pause to inspect the screen
+    break;
+  case RIGHT_KEY:
+    cur_dir = CW;
+    stepsperdiv = ((motorSteps * cur_angle) / 360);
+    moveMotor(stepsperdiv, cur_dir, moveangle);
+    delay(ScreenPause);   //pause to inspect the screen
+    break;
+  case SELECT_KEY:
+    cur_angle = 0; // reset angle to default of zero
+    returnToMenu();
+    return;
+    break;
+  }
+}
+
+void doRunMode(int key)
+{
+  switch (key)
+  {
+  case UP_KEY:                        // bump up the speed
+    if (motorspeeddelay >= SpeedDelayIncrement) {
+      motorspeeddelay -= SpeedDelayIncrement;        
+    }
+    break;
+  case DOWN_KEY:                      // bump down the speed
+    motorspeeddelay += SpeedDelayIncrement;      
+    break;
+  case LEFT_KEY:                      // set direction
+    cur_dir = CCW;      
+    break;
+  case RIGHT_KEY:                     // set other direction
+    cur_dir = CW;      
+    break;
+  case SELECT_KEY:                   // user wants to stop
+    motorspeeddelay = DefaultMotorSpeed;   // reset speed   
+    returnToMenu();
+    return;
+  }
+
+  moveMotor(1, cur_dir, 0);              // move motor 1 step
+}
+
+unsigned long last_displayed = 0;
+
+void doTempMode(int key)
+{ 
+  if (key == SELECT_KEY)
+  {
+    returnToMenu();
+    return;
+  }    
+  
+  unsigned long now = millis();
+  if (now - last_displayed > ScreenPause)
+  {
+    displayTempMode();
+    last_displayed = now;
+  }
+}
+
+void doJogMode(int key)
+{
+  switch (key)
+  {
+    case UP_KEY:                          // bump the number of steps
+      numjogsteps += JogStepsIncrement;
+      break;
+    case DOWN_KEY:                        // reduce the number of steps
+      if (numjogsteps > JogStepsIncrement)
+        numjogsteps -= JogStepsIncrement;
+      break;
+    case LEFT_KEY:                        // step the motor CCW
+      moveMotor(numjogsteps, CCW, 0);
+      break;
+    case RIGHT_KEY:                       // step the motor CW
+      moveMotor(numjogsteps, CW, 0);
+      break;
+    case SELECT_KEY:                      // user want to quit
+      numjogsteps = JogStepsIncrement;
+      returnToMenu();
+      break;
+  }
+}
+
+void doRatioMode(int key)
+{
+    switch (key)
     {
     case UP_KEY:                          // bump the number of steps
       ++gearratioindex;
@@ -425,18 +429,10 @@ void doRatioMode(int tmp_key)
     case RIGHT_KEY:
       break;
     case SELECT_KEY:                      // user want to quit
-      breakflag = 1;
+      numjogsteps = JogStepsIncrement;
+      returnToMenu();
       break;
     }
-    if (breakflag == 0)
-    {
-      displayScreen(ratiomode);
-      tmp_key = getRealKey();
-    }
-  }
-  numjogsteps = JogStepsIncrement;
-  cur_mode = mainmenu;                 // go back to main menu
-  return;
 }
 
 #pragma region Display routines
@@ -579,6 +575,11 @@ void displayRatioMode()
 
 #pragma endregion
 
+void displayScreen()
+{
+  displayScreen(cur_mode);
+}
+
 void displayScreen(int menunum)        // screen displays are here
 {
   lcd.clear();
@@ -613,46 +614,49 @@ void displayScreen(int menunum)        // screen displays are here
     displayRatioMode();
     break;
   }
+
   return;
 }
 
 void pulseMotor(int dir)
 {
+  //digitalWrite(motorDIRpin, dir);
+  //digitalWrite(motorSTEPpin, HIGH);   //pulse the motor
+  //delay(pulsewidth);
+  //digitalWrite(motorSTEPpin, LOW);
+  
   digitalWrite(motorDIRpin, dir);
-  digitalWrite(motorSTEPpin, HIGH);   //pulse the motor
-  delay(pulsewidth);
-  digitalWrite(motorSTEPpin, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);   //pulse the motor
+  stepper.step(1 * (dir == CCW ? -1 : 1));  
 }
 
 void moveMotor(unsigned long steps, int dir, int type)
 {
-  unsigned long i;
+  noInterrupts();
+  dirToGo = dir;
+  stepsToGo = steps;
+  interrupts();
 
-  if (type == movesteps)
-  {
-    displayScreen(movesteps);
-  }
-  else if (type == moveangle)
-  {
-    displayScreen(moveangle);
-  }
+  // Start execution.
+  Timer1.restart();
+}
 
-  for (i = 0; i < steps; i++)
+// Called from timer;
+void actionMotor()
+{
+  if (stepsToGo < 1)
   {
-    pulseMotor(dir);
-    if (type == movesteps)             // in this mode display progress
-    {
-      lcd.setCursor(10, 1);
-      lcd.print(i);
-    }
-    if (type == moveangle)             // in this mode display progress
-    {
-      lcd.setCursor(7, 0);
-      lcd.print(i);
-    }
-    delay(motorspeeddelay);            // wait betweeen pulses
+    Timer1.stop();
   }
-  return;
+  else
+  {
+    --stepsToGo;
+    digitalWrite(motorDIRpin, dirToGo);
+    digitalWrite(LED_BUILTIN, HIGH);   //pulse the motor
+    stepper.step(dirToGo == CCW ? -1 : 1);    
+	delayMicroseconds(500);
+    digitalWrite(LED_BUILTIN, LOW);
+  }
 }
 
 float convertTemperature(const byte temperatureMode, const int rawTemperature)
@@ -688,8 +692,9 @@ int getTemperature(int device)
   return (int)(temperature / TSampleSize);   // return the average
 }
 
-int getRealKey(void)    // routine to return a valid keystroke
+int getKey()    // routine to return a valid keystroke
 {
+#ifndef SERIAL_INPUT
   int trial_key = 0;
   while (trial_key < 1)
   {
@@ -697,6 +702,41 @@ int getRealKey(void)    // routine to return a valid keystroke
   }
   delay(200);             // 200 millisec delay between user keys
   return trial_key;
+#endif // !SERIAL_INPUT    
+  int readKey = lastKey;
+  lastKey = NO_KEY;
+  return readKey;
+}
+
+void serialEvent()
+{
+  byte key = NO_KEY;
+  if (Serial.available() > 0)
+  {    
+    Serial.readBytes(&key, 1);
+  }  
+
+  switch (key)
+  {
+  case (byte)38:
+    lastKey = UP_KEY;
+    break;
+  case (byte)39:
+    lastKey = RIGHT_KEY;
+    break;
+  case (byte)40:
+    lastKey = DOWN_KEY;
+    break;
+  case (byte)37:
+    lastKey = LEFT_KEY;
+    break;
+  case (byte)13:
+    lastKey = SELECT_KEY;
+    break;
+  default:
+    lastKey = NO_KEY;
+    break;
+  }
 }
 
 int readButton()     // routine to read the LCD's buttons
