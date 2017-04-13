@@ -12,17 +12,14 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 2.1 Frozen   October 2013 by Gary Liming
 2.2 Frozen   February 2014 by Gary Liming
 2.3 Frozen   September 2014 by Gary Liming
-3.0 Frozen   February 2017 by Tomasz P. Musielak
+3.0 Frozen   March 2017 by Tomasz P. Musielak
 */
 
 //  First, include some files for the LCD display, and its motor
 
 #include <Arduino.h>
-#include <Stepper.h>
 #include <TimerOne.h>
 
-#define I2C_LCD
-#define SERIAL_INPUT
 
 #ifndef I2C_LCD
 #include <LiquidCrystal.h>
@@ -31,6 +28,8 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #ifdef I2C_LCD
 #include <LiquidCrystal_I2C.h>
 #endif // DEBUG
+
+#define DEBUG
 
 //  Next define your parameters about your motor and gearing
 
@@ -41,12 +40,17 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 //   microstepping.  Set this number to the number of microsteps
 //   that is set on the driver board.  For large ratios, you may want to 
 //   use no microstepping and set this to 1.
-#define GearRatio1top  3        // Change these three values to reflect any front end gearing you 
-#define GearRatio1bottom 1      //   this is the bottom of the ratio - usually 1, as in 3 to 1, but you may change that here.
-#define GearRatio2top  40       //   are using for three different devices.  If no gearing, then
-#define GearRatio2bottom 1      //   40 to 1
-#define GearRatio3top  90       //   define this value to be 1.  GearRatio1 is the default
-#define GearRatio3bottom 1      //   90 to 1
+
+// Change these three values to reflect any front end gearing you 
+//   are using for three different devices.  If no gearing, then
+//   define this value to be 1.  GearRatio1 is the default
+//   this is the bottom of the ratio - usually 1, as in 3 to 1, but you may change that here.
+#define GearRatio1top  1        
+#define GearRatio1bottom 1
+#define GearRatio2top  3
+#define GearRatio2bottom 1
+#define GearRatio3top  40
+#define GearRatio3bottom 1
 
 #define GearRatioMax 3          // number of above gear ratios defined
 
@@ -91,10 +95,13 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #define JogStepsIncrement 1    // initial value of number of steps per keypress in test mode
 #define TSampleSize 7          // size of temperature sampling to average
 
+#define KeyDebounceDelayMs 10
+#define KeyRepeatDelayMs 500
+
 // create lcd display construct
 
 #ifndef I2C_LCD
-//LiquidCrystal lcd(8, 9, 4, 5, 6, 7);  //Data Structure and Pin Numbers for the LCD/Keypad
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7);  //Data Structure and Pin Numbers for the LCD/Keypad
 #endif // !I2C_LCD
 
 #ifdef I2C_LCD
@@ -115,6 +122,10 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);  // set the LCD address to 0x27 for a 16 cha
 #define DEG_C_SYMBOL byte(3)
 #define DEG_F_SYMBOL byte(4)
 
+#ifdef DEBUG
+unsigned long last_debug_displayed = 0;
+#endif // DEBUG
+
 // create global variables
 
 int    cur_mode = mainmenu;
@@ -122,15 +133,17 @@ int    mode_select = stepmode;
 int    current_menu;
 float  cur_angle = 0;
 int    cur_key;
-int    num_divisions = 0;
+int    num_divisions = 1;
 int    numjogsteps = JogStepsIncrement;
 unsigned long stepsperdiv;
 int    cur_pos = 0;
 int    cur_dir = CW;
 int    motorspeeddelay = DefaultMotorSpeed;
-unsigned long motorSteps;
+unsigned long motorSteps; // Total number of motor steps per revolution.
+
 unsigned long gear_ratio_top_array[GearRatioMax] = { GearRatio1top,GearRatio2top,GearRatio3top };
 unsigned long gear_ratio_bottom_array[GearRatioMax] = { GearRatio1bottom,GearRatio2bottom,GearRatio3bottom };
+
 int    gearratioindex = 0;      // the first array element starts with 0 and is the default ration chosen
 
 byte temperatureMode = Temperature_C;
@@ -139,29 +152,28 @@ byte temperatureSymbol = DEG_C_SYMBOL;
 bool drawScreenNeeded = true;
 volatile int lastKey = NO_KEY;
 
-Stepper stepper(StepsPerRevolution, 7, 6, 5, 4);
-
 volatile int dirToGo = 0;
 volatile unsigned long stepsToGo = 0;
+volatile bool motorEnabled = false;
 
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);
-  Serial.begin(9600);  
-
-  stepper.setSpeed(1000);
-
+  Serial.begin(9600);
+  
   //  Create some custom characters for the lcd display
   byte c_CW[8] = { 0b01101,0b10011,0b10111,0b10000,0b10000,0b10000,0b10001,0b01110 }; // Clockwise
   byte c_CCW[8] = { 0b10110,0b11001,0b11101,0b00001,0b00001,0b00001,0b10001,0b01110 }; // CounterClockWise
 
   byte c_DegreeF[8] = { 0b01000,0b10100,0b01000,0b00111,0b00100,0b00110,0b00100,0b00100 }; //  degreeF
   byte c_DegreeC[8] = { 0b01000,0b10100,0b01011,0b00101,0b00100,0b00100,0b00101,0b00011 }; //  degreeC
-
+    
+#ifdef I2C_LCD
   lcd.init();
   lcd.clear();
-  lcd.backlight();  
-    
+  lcd.backlight();
+#endif // I2C_LCD
+
   lcd.createChar(CW_SYMBOL, c_CW);
   lcd.createChar(CCW_SYMBOL, c_CCW);
   lcd.createChar(DEG_C_SYMBOL, c_DegreeC);
@@ -178,9 +190,8 @@ void setup()
   pinMode(motorSTEPpin, OUTPUT);     // set pin 3 to output
   pinMode(motorDIRpin, OUTPUT);      // set pin 2 to output
   pinMode(motorENABLEpin, OUTPUT);   // set pin 11 to output
-  //digitalWrite(motorENABLEpin, HIGH); // power up the motor and leave it on  
-
-  Timer1.initialize(pulsewidth * 1000);
+  
+  Timer1.initialize(5);
   Timer1.stop();
   Timer1.attachInterrupt(actionMotor);
 
@@ -235,8 +246,28 @@ void loop()                          // main loop services keystrokes
   {
     displayScreen(cur_mode);
   }
+
+#ifdef DEBUG
+  unsigned long now = millis();
+  if (now - last_debug_displayed > 2000)
+  {
+    printDebug();
+  }
+#endif // DEBUG
 }  
 
+void printDebug()
+{
+  unsigned long now = millis();
+  Serial.print(now);
+  Serial.print(" enabled: ");
+  Serial.print(motorEnabled);
+  Serial.print(" stepsTogo: ");
+  Serial.print(stepsToGo);
+  Serial.print(" dir: ");
+  Serial.println(dirToGo);
+  last_debug_displayed = now;
+}
 
 void doMainMenu(int key)
 { 
@@ -274,14 +305,14 @@ void doStepMode(int key)
     num_divisions++;      
     break;
   case DOWN_KEY:
-    if (num_divisions > 0)
+    if (num_divisions > 1)
       num_divisions--;      
     break;
   case LEFT_KEY:
     cur_dir = CCW;
     stepsperdiv = (motorSteps / num_divisions);
-    moveMotor(stepsperdiv, cur_dir, movesteps);
-    //delay(ScreenPause);   //pause to inspect the screen
+    moveMotor(stepsperdiv, cur_dir);
+    
     cur_pos--;
     if (cur_pos == (-num_divisions))
       cur_pos = 0;      
@@ -289,15 +320,17 @@ void doStepMode(int key)
   case RIGHT_KEY:
     cur_dir = CW;
     stepsperdiv = (motorSteps / num_divisions);
-    moveMotor(stepsperdiv, cur_dir, movesteps);
-    //delay(ScreenPause); // pause to inspect the screen
+    moveMotor(stepsperdiv, cur_dir);
+    
     cur_pos++;
     if (cur_pos == num_divisions)
       cur_pos = 0;      
     break;
   case SELECT_KEY:
     cur_pos = 0;       // reset position
-    num_divisions = 0; // reset number of divisions
+    num_divisions = 1; // reset number of divisions
+    stepsToGo = 0;
+    disableMotor();
     returnToMenu();
     return;
   }
@@ -323,17 +356,16 @@ void doAngleMode(int key)
   case LEFT_KEY:
     cur_dir = CCW;
     stepsperdiv = ((motorSteps * cur_angle) / 360);
-    moveMotor(stepsperdiv, cur_dir, moveangle);
-    delay(ScreenPause);   //pause to inspect the screen
+    moveMotor(stepsperdiv, cur_dir);
     break;
   case RIGHT_KEY:
     cur_dir = CW;
     stepsperdiv = ((motorSteps * cur_angle) / 360);
-    moveMotor(stepsperdiv, cur_dir, moveangle);
-    delay(ScreenPause);   //pause to inspect the screen
+    moveMotor(stepsperdiv, cur_dir);
     break;
   case SELECT_KEY:
     cur_angle = 0; // reset angle to default of zero
+    disableMotor();
     returnToMenu();
     return;
     break;
@@ -359,12 +391,13 @@ void doRunMode(int key)
     cur_dir = CW;      
     break;
   case SELECT_KEY:                   // user wants to stop
-    motorspeeddelay = DefaultMotorSpeed;   // reset speed   
+    motorspeeddelay = DefaultMotorSpeed;   // reset speed
+    stopMotor();
     returnToMenu();
     return;
   }
 
-  moveMotor(1, cur_dir, 0);              // move motor 1 step
+  moveMotor(100000, cur_dir);
 }
 
 unsigned long last_displayed = 0;
@@ -397,13 +430,15 @@ void doJogMode(int key)
         numjogsteps -= JogStepsIncrement;
       break;
     case LEFT_KEY:                        // step the motor CCW
-      moveMotor(numjogsteps, CCW, 0);
+      moveMotor(numjogsteps, CCW);
       break;
     case RIGHT_KEY:                       // step the motor CW
-      moveMotor(numjogsteps, CW, 0);
+      moveMotor(numjogsteps, CW);
       break;
     case SELECT_KEY:                      // user want to quit
       numjogsteps = JogStepsIncrement;
+      stopMotor();
+      disableMotor();
       returnToMenu();
       break;
   }
@@ -430,6 +465,8 @@ void doRatioMode(int key)
       break;
     case SELECT_KEY:                      // user want to quit
       numjogsteps = JogStepsIncrement;
+      stopMotor();
+      disableMotor();
       returnToMenu();
       break;
     }
@@ -618,45 +655,93 @@ void displayScreen(int menunum)        // screen displays are here
   return;
 }
 
-void pulseMotor(int dir)
-{
-  //digitalWrite(motorDIRpin, dir);
-  //digitalWrite(motorSTEPpin, HIGH);   //pulse the motor
-  //delay(pulsewidth);
-  //digitalWrite(motorSTEPpin, LOW);
-  
-  digitalWrite(motorDIRpin, dir);
-  digitalWrite(LED_BUILTIN, HIGH);   //pulse the motor
-  stepper.step(1 * (dir == CCW ? -1 : 1));  
-}
-
-void moveMotor(unsigned long steps, int dir, int type)
+void moveMotor(unsigned long steps, int dir)
 {
   noInterrupts();
-  dirToGo = dir;
-  stepsToGo = steps;
-  interrupts();
-
-  // Start execution.
-  Timer1.restart();
-}
-
-// Called from timer;
-void actionMotor()
-{
-  if (stepsToGo < 1)
+  if (!stepsToGo) // Not executing any moves at present.
   {
-    Timer1.stop();
+    enableMotor();
+    setDirection(dir);
+    stepsToGo = steps;
+    
+
+    // Start execution.
+    Timer1.restart();
+    Timer1.start();
   }
   else
   {
-    --stepsToGo;
-    digitalWrite(motorDIRpin, dirToGo);
-    digitalWrite(LED_BUILTIN, HIGH);   //pulse the motor
-    stepper.step(dirToGo == CCW ? -1 : 1);    
-	delayMicroseconds(500);
-    digitalWrite(LED_BUILTIN, LOW);
+    long stepsEffective = stepsToGo + (dirToGo == dir ? steps : -steps);
+    if (stepsEffective < 0) // Adding steps in other direction needs reversing of the motor.
+    {
+      setDirection(dir);
+      stepsToGo = abs(stepsEffective);
+    }
+    else
+    {
+      stepsToGo += steps;
+    }
   }
+  interrupts();
+
+  printDebug();  
+}
+
+void stopMotor()
+{
+  noInterrupts();
+  stepsToGo = 0;
+  disableMotor();
+  interrupts();
+  Timer1.stop();  
+}
+
+void enableMotor()
+{
+  motorEnabled = true;
+  digitalWrite(motorENABLEpin, HIGH);
+}
+
+void disableMotor()
+{ 
+  noInterrupts();  
+  motorEnabled = false;
+  digitalWrite(motorENABLEpin, LOW);
+  interrupts();
+}
+
+void setDirection(int dir)
+{
+  dirToGo = dir;
+  digitalWrite(motorDIRpin, dir);
+}
+
+volatile bool motorIRSBusy = false;
+bool nextMotorPulseState = HIGH;
+
+// Called from timer.
+void actionMotor()
+{
+  if (motorIRSBusy) // Avoid nesting.
+  {
+    return;
+  }
+
+  motorIRSBusy = true;
+
+  digitalWrite(LED_BUILTIN, nextMotorPulseState);
+  nextMotorPulseState = !nextMotorPulseState;  
+  if (nextMotorPulseState) // Pulse complete.
+  {
+    --stepsToGo;
+    if (stepsToGo < 1 || !motorEnabled)
+    {
+      stepsToGo = 0;
+      Timer1.stop();
+    }
+  }
+
+  motorIRSBusy = false;
 }
 
 float convertTemperature(const byte temperatureMode, const int rawTemperature)
@@ -692,20 +777,38 @@ int getTemperature(int device)
   return (int)(temperature / TSampleSize);   // return the average
 }
 
+unsigned long buttonLastRead = 0;
+unsigned long keyLastHandled = 0;
+
 int getKey()    // routine to return a valid keystroke
 {
-#ifndef SERIAL_INPUT
-  int trial_key = 0;
-  while (trial_key < 1)
-  {
-    trial_key = readButton();
-  }
-  delay(200);             // 200 millisec delay between user keys
-  return trial_key;
-#endif // !SERIAL_INPUT    
+  
+#ifdef SERIAL_INPUT
   int readKey = lastKey;
   lastKey = NO_KEY;
   return readKey;
+#endif // !SERIAL_INPUT
+  unsigned long now = millis();
+
+  int readKey = readButton();
+  if (readKey != lastKey)
+  {
+    if (now - buttonLastRead >= KeyDebounceDelayMs)
+    {
+      buttonLastRead = now;
+      lastKey = readKey;
+      return lastKey;
+    }
+  }
+
+  // Send keypress no more than every KeyRepeatDelayMs.
+  if (now - keyLastHandled >= KeyRepeatDelayMs)
+  {
+    keyLastHandled = now;
+    return lastKey;
+  }
+  
+  return NO_KEY;
 }
 
 void serialEvent()
@@ -739,14 +842,15 @@ void serialEvent()
   }
 }
 
-int readButton()     // routine to read the LCD's buttons
+int readButton()
 {
   int key_in;
-  delay(ADSettleTime);         // wait to settle
-  key_in = analogRead(0);      // read ADC once
-  delay(ADSettleTime);         // wait to settle
-                 // average values for my board were: 0, 144, 324, 505, 742
-                 // add approx 100 to those values to set range
+  
+  analogRead(0); // Discard first ADC reading.
+  key_in = analogRead(0);      // read ADC.
+
+  // average values for my board were: 0, 144, 324, 505, 742
+  // add approx 100 to those values to set range
   if (key_in > 850) return NO_KEY;
   if (key_in < 70)   return RIGHT_KEY;
   if (key_in < 250)  return UP_KEY;
