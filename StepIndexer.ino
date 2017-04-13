@@ -82,7 +82,7 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 
 #define motorSTEPpin   2    // output signal to step the motor
 #define motorDIRpin    3    // output siagnal to set direction
-#define motorENABLEpin 11   // output pin to power up the motor
+#define motorENABLEpin 4    // output pin to power up the motor
 #define AnalogKeyPin   0    // keypad uses A0
 #define SinkTempPin    1    // temp sensor for heatsink is pin A1
 #define MotorTempPin   2    // temp sensor for motor is pin A2
