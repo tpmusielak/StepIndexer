@@ -33,10 +33,10 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 
 //  Next define your parameters about your motor and gearing
 
-#define StepsPerRevolution 513  // Change this to represent the number of steps
+#define StepsPerRevolution 20000  // Change this to represent the number of steps
 //   it takes the motor to do one full revolution
 //   200 is the result of a 1.8 degree per step motor
-#define Microsteps 8            // Depending on your stepper driver, it may support
+#define Microsteps 1            // Depending on your stepper driver, it may support
 //   microstepping.  Set this number to the number of microsteps
 //   that is set on the driver board.  For large ratios, you may want to 
 //   use no microstepping and set this to 1.
@@ -59,7 +59,8 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #define CW HIGH                 // Define direction of rotation - 
 #define CCW LOW                 // If rotation needs to be reversed, swap HIGH and LOW here
 
-#define DefaultMotorSpeed 0     // zero here means fast, as in no delay
+#define MotorISRPeriod 25
+#define DefaultMotorSpeed MotorISRPeriod  
 
 // define menu screen ids
 #define mainmenu  0
@@ -80,9 +81,9 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 // Define the pins that the driver is attached to.
 // Once set, this are normally not changed since they correspond to the wiring.
 
-#define motorSTEPpin   2    // output signal to step the motor
-#define motorDIRpin    3    // output siagnal to set direction
-#define motorENABLEpin 4    // output pin to power up the motor
+#define motorSTEPpin   A5   // output signal to step the motor
+#define motorDIRpin    A4   // output siagnal to set direction
+#define motorENABLEpin A3   // output pin to power up the motor
 #define AnalogKeyPin   0    // keypad uses A0
 #define SinkTempPin    1    // temp sensor for heatsink is pin A1
 #define MotorTempPin   2    // temp sensor for motor is pin A2
@@ -91,11 +92,11 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #define ScreenPause    800  // pause after screen completion
 #define ADSettleTime   10   // ms delay to let AD converter "settle" i.e., discharge
 
-#define SpeedDelayIncrement 5  // change value of motor speed steps (delay amount)
-#define JogStepsIncrement 1    // initial value of number of steps per keypress in test mode
+#define SpeedDelayIncrement 10  // change value of motor speed steps (delay amount)
+#define JogStepsIncrement 100    // initial value of number of steps per keypress in test mode
 #define TSampleSize 7          // size of temperature sampling to average
 
-#define KeyDebounceDelayMs 10
+#define KeyDebounceDelayMs 100
 #define KeyRepeatDelayMs 500
 
 // create lcd display construct
@@ -138,7 +139,8 @@ int    numjogsteps = JogStepsIncrement;
 unsigned long stepsperdiv;
 int    cur_pos = 0;
 int    cur_dir = CW;
-int    motorspeeddelay = DefaultMotorSpeed;
+volatile unsigned int motorSpeedDelay = DefaultMotorSpeed;
+
 unsigned long motorSteps; // Total number of motor steps per revolution.
 
 unsigned long gear_ratio_top_array[GearRatioMax] = { GearRatio1top,GearRatio2top,GearRatio3top };
@@ -155,12 +157,18 @@ volatile int lastKey = NO_KEY;
 volatile int dirToGo = 0;
 volatile unsigned long stepsToGo = 0;
 volatile bool motorEnabled = false;
+volatile unsigned long stepsExecuted = 0;
+
+//byte last_r_readings[1000];
+//byte r_readings_count = 0;
+
+unsigned long cycles = 0;
 
 void setup()
 {
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(9600);
-  
+    
   //  Create some custom characters for the lcd display
   byte c_CW[8] = { 0b01101,0b10011,0b10111,0b10000,0b10000,0b10000,0b10001,0b01110 }; // Clockwise
   byte c_CCW[8] = { 0b10110,0b11001,0b11101,0b00001,0b00001,0b00001,0b10001,0b01110 }; // CounterClockWise
@@ -190,8 +198,12 @@ void setup()
   pinMode(motorSTEPpin, OUTPUT);     // set pin 3 to output
   pinMode(motorDIRpin, OUTPUT);      // set pin 2 to output
   pinMode(motorENABLEpin, OUTPUT);   // set pin 11 to output
+
+  digitalWrite(motorSTEPpin, LOW);
+  digitalWrite(motorDIRpin, LOW);
+  digitalWrite(motorENABLEpin, HIGH);
   
-  Timer1.initialize(5);
+  Timer1.initialize(MotorISRPeriod);
   Timer1.stop();
   Timer1.attachInterrupt(actionMotor);
 
@@ -254,19 +266,38 @@ void loop()                          // main loop services keystrokes
     printDebug();
   }
 #endif // DEBUG
+  cycles++;
 }  
 
 void printDebug()
 {
-  unsigned long now = millis();
+  unsigned long now = millis();  
+    
   Serial.print(now);
+  Serial.print(" cycles: ");
+  Serial.print(cycles);
+  Serial.print(" mode: ");
+  Serial.print(mode_select);
   Serial.print(" enabled: ");
   Serial.print(motorEnabled);
   Serial.print(" stepsTogo: ");
   Serial.print(stepsToGo);
   Serial.print(" dir: ");
-  Serial.println(dirToGo);
+  Serial.print(dirToGo);
+  Serial.print(" stepsExecuted: ");
+  Serial.println(stepsExecuted);
+
+//  String s = "Last r: [";
+//  for(int i = 0; i < r_readings_count; i++)
+//  {
+//    s.concat(last_r_readings[i]);
+//    s.concat(",");    
+//  }    
+//  s.concat("]");
+//  Serial.println(s);
+//  r_readings_count = 0;  
   last_debug_displayed = now;
+  cycles = 0;
 }
 
 void doMainMenu(int key)
@@ -293,8 +324,10 @@ void doMainMenu(int key)
 
 void setMode(int mode)
 {
-  cur_mode = mode;
+  Serial.print("Entering mode ");
+  Serial.println(mode);
   displayScreen(mode);  
+  cur_mode = mode;
 }
 
 void doStepMode(int key)
@@ -372,32 +405,50 @@ void doAngleMode(int key)
   }
 }
 
+volatile bool run_enabled = false;
+
 void doRunMode(int key)
 {
   switch (key)
   {
   case UP_KEY:                        // bump up the speed
-    if (motorspeeddelay >= SpeedDelayIncrement) {
-      motorspeeddelay -= SpeedDelayIncrement;        
+    if (motorSpeedDelay >= DefaultMotorSpeed) {
+      motorSpeedDelay -= SpeedDelayIncrement;        
+      setMotorSpeed(motorSpeedDelay);
     }
     break;
   case DOWN_KEY:                      // bump down the speed
-    motorspeeddelay += SpeedDelayIncrement;      
+    motorSpeedDelay += SpeedDelayIncrement;      
+    setMotorSpeed(motorSpeedDelay);
     break;
   case LEFT_KEY:                      // set direction
-    cur_dir = CCW;      
+    cur_dir = CCW;          
+    run_enabled = true;
     break;
   case RIGHT_KEY:                     // set other direction
     cur_dir = CW;      
+    run_enabled = true;
     break;
   case SELECT_KEY:                   // user wants to stop
-    motorspeeddelay = DefaultMotorSpeed;   // reset speed
+    motorSpeedDelay = DefaultMotorSpeed;   // reset speed
     stopMotor();
     returnToMenu();
     return;
-  }
+  }  
 
-  moveMotor(100000, cur_dir);
+  if(run_enabled && (stepsToGo < 1000))
+  {
+    moveMotor(5000, cur_dir);  
+  }
+}
+
+void setMotorSpeed(unsigned int motorDelay)
+{  
+  Timer1.stop();
+  Timer1.setPeriod(motorDelay);  
+  
+  Timer1.restart();  
+  Timer1.start();  
 }
 
 unsigned long last_displayed = 0;
@@ -578,15 +629,19 @@ void displayMoveAngle()
 void displayRunMode()
 {
   lcd.print("Continuous");
-  lcd.setCursor(11, 0);
-  if (cur_dir == CW)
-    lcd.write(CW_SYMBOL);
-  else
-    lcd.write(CCW_SYMBOL);
+  if(run_enabled)
+  {
+    lcd.setCursor(11, 0);  
+    if (cur_dir == CW)
+      lcd.write(CW_SYMBOL);
+    else
+      lcd.write(CCW_SYMBOL);    
+  }
   lcd.setCursor(0, 1);
   lcd.print("Speed = ");
   lcd.setCursor(8, 1);
-  lcd.print((int)motorspeeddelay);
+  
+  lcd.print((int)motorSpeedDelay);
 }
 
 void displayJogMode()
@@ -612,13 +667,11 @@ void displayRatioMode()
 
 #pragma endregion
 
-void displayScreen()
-{
-  displayScreen(cur_mode);
-}
-
 void displayScreen(int menunum)        // screen displays are here
 {
+  Serial.print("Displaying screen for mode ");
+  Serial.println(menunum);
+  
   lcd.clear();
   lcd.setCursor(0, 0);
   switch (menunum)
@@ -657,34 +710,40 @@ void displayScreen(int menunum)        // screen displays are here
 
 void moveMotor(unsigned long steps, int dir)
 {
-  noInterrupts();
-  if (!stepsToGo) // Not executing any moves at present.
+//  Serial.print("moveMotor(");
+//  Serial.print(steps);
+//  Serial.print(", ");
+//  Serial.print(dir);
+//  Serial.println(")");
+    
+  
+  if (stepsToGo < 1) // Not executing any moves at present.
   {
+    noInterrupts();
     enableMotor();
     setDirection(dir);
     stepsToGo = steps;
-    
 
+    interrupts();
+    
     // Start execution.
     Timer1.restart();
-    Timer1.start();
+    Timer1.start();    
   }
   else
   {
-    long stepsEffective = stepsToGo + (dirToGo == dir ? steps : -steps);
-    if (stepsEffective < 0) // Adding steps in other direction needs reversing of the motor.
-    {
-      setDirection(dir);
-      stepsToGo = abs(stepsEffective);
-    }
-    else
+    noInterrupts();
+    if(dir == dirToGo)
     {
       stepsToGo += steps;
+    }    
+    else
+    {
+      setDirection(dir);
+      stepsToGo = steps;
     }
-  }
-  interrupts();
-
-  printDebug();  
+    interrupts();
+  }  
 }
 
 void stopMotor()
@@ -699,14 +758,14 @@ void stopMotor()
 void enableMotor()
 {
   motorEnabled = true;
-  digitalWrite(motorENABLEpin, HIGH);
+  digitalWrite(motorENABLEpin, LOW); // This is inverted in M542
 }
 
 void disableMotor()
 { 
   noInterrupts();  
   motorEnabled = false;
-  digitalWrite(motorENABLEpin, LOW);
+  digitalWrite(motorENABLEpin, HIGH);
   interrupts();
 }
 
@@ -717,6 +776,7 @@ void setDirection(int dir)
 }
 
 volatile bool motorIRSBusy = false;
+volatile unsigned long lastPulse = 0;
 bool nextMotorPulseState = HIGH;
 
 // Called from timer.
@@ -727,13 +787,14 @@ void actionMotor()
     return;
   }
 
-  motorIRSBusy = true;
-
-  digitalWrite(LED_BUILTIN, nextMotorPulseState);
+  motorIRSBusy = true;  
+ 
+  digitalWrite(motorSTEPpin, nextMotorPulseState);
   nextMotorPulseState = !nextMotorPulseState;  
   if (nextMotorPulseState) // Pulse complete.
   {
     --stepsToGo;
+    ++stepsExecuted;
     if (stepsToGo < 1 || !motorEnabled)
     {
       stepsToGo = 0;
@@ -791,12 +852,17 @@ int getKey()    // routine to return a valid keystroke
   unsigned long now = millis();
 
   int readKey = readButton();
+  
+//  last_r_readings[r_readings_count++] = readKey;
+  
   if (readKey != lastKey)
   {
     if (now - buttonLastRead >= KeyDebounceDelayMs)
     {
       buttonLastRead = now;
-      lastKey = readKey;
+      lastKey = readKey;      
+      Serial.print("Read key: ");
+      Serial.println(lastKey);
       return lastKey;
     }
   }
@@ -842,20 +908,25 @@ void serialEvent()
   }
 }
 
+#define R_NO_KEY 1000
+#define R_RIGHT_KEY 70
+#define R_UP_KEY 150
+#define R_DOWN_KEY 400
+#define R_LEFT_KEY 500
+#define R_SELECT_KEY 750
+
 int readButton()
 {
-  int key_in;
-  
-  analogRead(0); // Discard first ADC reading.
-  key_in = analogRead(0);      // read ADC.
+  analogRead(0);
+  int key_in = analogRead(0);      // read ADC.
 
   // average values for my board were: 0, 144, 324, 505, 742
   // add approx 100 to those values to set range
-  if (key_in > 850) return NO_KEY;
-  if (key_in < 70)   return RIGHT_KEY;
-  if (key_in < 250)  return UP_KEY;
-  if (key_in < 450)  return DOWN_KEY;
-  if (key_in < 650)  return LEFT_KEY;
-  if (key_in < 850)  return SELECT_KEY;
+  if (key_in > R_NO_KEY)      return NO_KEY;
+  if (key_in < R_RIGHT_KEY)   return RIGHT_KEY;
+  if (key_in < R_UP_KEY)      return UP_KEY;
+  if (key_in < R_DOWN_KEY)    return DOWN_KEY;
+  if (key_in < R_LEFT_KEY)    return LEFT_KEY;
+  if (key_in < R_SELECT_KEY)  return SELECT_KEY;
 }
 
