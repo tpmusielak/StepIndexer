@@ -1,5 +1,5 @@
 /*
-Step Indexer v. 3.0
+Step Indexer v. 3.1
 
 This program controls the position of a stepper output shaft via
 manual input and displays the result.  It also provides temperature
@@ -16,10 +16,8 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 */
 
 //  First, include some files for the LCD display, and its motor
-
 #include <Arduino.h>
 #include <TimerOne.h>
-
 
 #ifndef I2C_LCD
 #include <LiquidCrystal.h>
@@ -30,6 +28,7 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #endif // DEBUG
 
 #define DEBUG
+#pragma region Motor parameters
 
 //  Next define your parameters about your motor and gearing
 
@@ -41,30 +40,24 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 //   that is set on the driver board.  For large ratios, you may want to 
 //   use no microstepping and set this to 1.
 
-// Change these three values to reflect any front end gearing you 
-//   are using for three different devices.  If no gearing, then
-//   define this value to be 1.  GearRatio1 is the default
-//   this is the bottom of the ratio - usually 1, as in 3 to 1, but you may change that here.
-#define GearRatio1top  1        
-#define GearRatio1bottom 1
-#define GearRatio2top  3
-#define GearRatio2bottom 1
-#define GearRatio3top  40
-#define GearRatio3bottom 1
-
-#define GearRatioMax 3          // number of above gear ratios defined
+#define GearRatioCount 3          // Number of gear ratios defined
 
 #define AngleIncrement 5        // Set how much a keypress changes the angle setting
 
-#define CW HIGH                 // Define direction of rotation - 
-#define CCW LOW                 // If rotation needs to be reversed, swap HIGH and LOW here
+#define CW LOW                 // Define direction of rotation
+#define CCW HIGH               // If rotation needs to be reversed, swap HIGH and LOW here
 
-#define MotorISRPeriod 25
+#define MotorISRPeriod 15  // Setting below 15 freezes the program when the motor is running.
 #define DefaultMotorSpeed MotorISRPeriod  
 
+#pragma endregion Motor parameters
+
+#define version "3.1"
+
+#pragma region Menu items
 // define menu screen ids
 #define mainmenu  0
-#define stepmode  1
+#define divisions 1
 #define anglemode 2
 #define runmode   3
 #define jogmode   4
@@ -74,6 +67,8 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 
 #define moveangle 10
 #define movesteps 11
+
+#pragma endregion Menu items
 
 #define Temperature_C 1
 #define Temperature_F 2
@@ -92,12 +87,11 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 #define ScreenPause    800  // pause after screen completion
 #define ADSettleTime   10   // ms delay to let AD converter "settle" i.e., discharge
 
-#define SpeedDelayIncrement 10  // change value of motor speed steps (delay amount)
 #define JogStepsIncrement 100    // initial value of number of steps per keypress in test mode
 #define TSampleSize 7          // size of temperature sampling to average
 
 #define KeyDebounceDelayMs 100
-#define KeyRepeatDelayMs 500
+#define KeyRepeatDelayMs 333
 
 // create lcd display construct
 
@@ -130,7 +124,7 @@ unsigned long last_debug_displayed = 0;
 // create global variables
 
 int    cur_mode = mainmenu;
-int    mode_select = stepmode;
+int    mode_select = divisions;
 int    current_menu;
 float  cur_angle = 0;
 int    cur_key;
@@ -143,8 +137,12 @@ volatile unsigned int motorSpeedDelay = DefaultMotorSpeed;
 
 unsigned long motorSteps; // Total number of motor steps per revolution.
 
-unsigned long gear_ratio_top_array[GearRatioMax] = { GearRatio1top,GearRatio2top,GearRatio3top };
-unsigned long gear_ratio_bottom_array[GearRatioMax] = { GearRatio1bottom,GearRatio2bottom,GearRatio3bottom };
+// Change these values to reflect any front end gearing you 
+//   are using for three different devices.  If no gearing, then
+//   define this value to be 1.  GearRatio1 is the default
+//   this is the bottom of the ratio - usually 1, as in 3 to 1, but you may change that here.
+unsigned long gear_ratio_top_array[GearRatioCount]    = { 15, 3, 1 };
+unsigned long gear_ratio_bottom_array[GearRatioCount] = {  1, 1, 1 };
 
 int    gearratioindex = 0;      // the first array element starts with 0 and is the default ration chosen
 
@@ -152,15 +150,13 @@ byte temperatureMode = Temperature_C;
 byte temperatureSymbol = DEG_C_SYMBOL;
 
 bool drawScreenNeeded = true;
-volatile int lastKey = NO_KEY;
+
+bool modeEnabled[numModes] = { true, true, true, true, true, false /* Temp mode disabled */ };
 
 volatile int dirToGo = 0;
 volatile unsigned long stepsToGo = 0;
 volatile bool motorEnabled = false;
 volatile unsigned long stepsExecuted = 0;
-
-//byte last_r_readings[1000];
-//byte r_readings_count = 0;
 
 unsigned long cycles = 0;
 
@@ -210,50 +206,13 @@ void setup()
   displayMainMenu();
 }                                    // end of setup function
 
-void printIntroScreen()
-{
-  lcd.begin(16, 2);
-  lcd.clear();
-  lcd.setCursor(0, 0);                 // display flash screen
-  lcd.print("Step Indexer 3.0");
-  lcd.setCursor(0, 1);
-  lcd.print("Ratio =");
-  lcd.setCursor(8, 1);
-  lcd.print(gear_ratio_top_array[gearratioindex]);
-  lcd.setCursor(12, 1);
-  lcd.print(":");
-  lcd.print(gear_ratio_bottom_array[gearratioindex]);
-}
+
 
 void loop()                          // main loop services keystrokes
 { 
   int key = getKey();
-
-  switch (cur_mode)                    // execute the keystroke
-  {
-  case mainmenu:                    // main menu
-    doMainMenu(key);
-    break;
-  case tempmode:                    // call temps
-    doTempMode(key);    
-    break;
-  case stepmode:                    // call steps
-    doStepMode(key);    
-    break;
-  case anglemode:                   // call angles
-    doAngleMode(key);    
-    break;
-  case runmode:                     // call run  
-    doRunMode(key);    
-    break;
-  case jogmode:                    // call jog
-    doJogMode(key);    
-    break;
-  case ratiomode:                 // call ratio
-    doRatioMode(key);    
-    break;
-  }
-
+  runModes(key);
+  
   if (key != NO_KEY)
   {
     displayScreen(cur_mode);
@@ -268,6 +227,34 @@ void loop()                          // main loop services keystrokes
 #endif // DEBUG
   cycles++;
 }  
+
+void runModes(int key)
+{
+  switch (cur_mode)                    // execute the keystroke
+  {
+  case mainmenu:                    // main menu
+    doMainMenu(key);
+    break;
+  case tempmode:                    // call temps
+    doTempMode(key);    
+    break;
+  case divisions:                    // call steps
+    doDivisionsMode(key);    
+    break;
+  case anglemode:                   // call angles
+    doAngleMode(key);    
+    break;
+  case runmode:                     // call run  
+    doRunMode(key);    
+    break;
+  case jogmode:                    // call jog
+    doJogMode(key);    
+    break;
+  case ratiomode:                 // call ratio
+    doRatioMode(key);    
+    break;
+  }
+}
 
 void printDebug()
 {
@@ -306,15 +293,19 @@ void doMainMenu(int key)
   {
   case LEFT_KEY:
   case UP_KEY:
-    mode_select++;
+    mode_select++;    
+    if(!modeEnabled[mode_select - 1])
+      mode_select++;
     if (mode_select > numModes)  // wrap around menu
-      mode_select = 1;      
+      mode_select = 1;          
     break;
   case RIGHT_KEY:
   case DOWN_KEY:
-    mode_select--;
+    mode_select--;    
     if (mode_select < 1)         // wrap around menu
       mode_select = numModes;      
+    if(!modeEnabled[mode_select - 1])
+      mode_select--;
     break;
   case SELECT_KEY:         // user has picked a menu item
     setMode(mode_select);      
@@ -330,16 +321,19 @@ void setMode(int mode)
   cur_mode = mode;
 }
 
-void doStepMode(int key)
+void doDivisionsMode
+(int key)
 {
   switch (key)
   {
   case UP_KEY:
     num_divisions++;      
+    cur_pos = 0;
     break;
   case DOWN_KEY:
     if (num_divisions > 1)
       num_divisions--;      
+    cur_pos = 0;
     break;
   case LEFT_KEY:
     cur_dir = CCW;
@@ -347,8 +341,8 @@ void doStepMode(int key)
     moveMotor(stepsperdiv, cur_dir);
     
     cur_pos--;
-    if (cur_pos == (-num_divisions))
-      cur_pos = 0;      
+    if (cur_pos < 0)
+      cur_pos = num_divisions - 1;      
     break;
   case RIGHT_KEY:
     cur_dir = CW;
@@ -406,31 +400,52 @@ void doAngleMode(int key)
 }
 
 volatile bool run_enabled = false;
+volatile unsigned int motorSpeedPercentage = 100;
 
 void doRunMode(int key)
 {
   switch (key)
   {
-  case UP_KEY:                        // bump up the speed
-    if (motorSpeedDelay >= DefaultMotorSpeed) {
-      motorSpeedDelay -= SpeedDelayIncrement;        
+  case UP_KEY:                        // bump up the speed    
+    if(motorSpeedPercentage < 100) 
+    {
+      motorSpeedPercentage += 10;
+      motorSpeedDelay = getMotorSpeedDelay(motorSpeedPercentage);
       setMotorSpeed(motorSpeedDelay);
-    }
+    }     
     break;
   case DOWN_KEY:                      // bump down the speed
-    motorSpeedDelay += SpeedDelayIncrement;      
-    setMotorSpeed(motorSpeedDelay);
+    if(motorSpeedPercentage > 10) 
+    {
+      motorSpeedPercentage -= 10;
+      motorSpeedDelay = getMotorSpeedDelay(motorSpeedPercentage);
+      setMotorSpeed(motorSpeedDelay);
+    }    
     break;
   case LEFT_KEY:                      // set direction
+    if(cur_dir == CCW && run_enabled)
+    {
+      run_enabled = false;
+      stopMotor();
+      break;
+    }
     cur_dir = CCW;          
     run_enabled = true;
     break;
   case RIGHT_KEY:                     // set other direction
+    if(cur_dir == CW && run_enabled)
+    {
+      run_enabled = false;
+      stopMotor();
+      break;
+    }
     cur_dir = CW;      
     run_enabled = true;
     break;
   case SELECT_KEY:                   // user wants to stop
     motorSpeedDelay = DefaultMotorSpeed;   // reset speed
+    run_enabled = false;
+
     stopMotor();
     returnToMenu();
     return;
@@ -440,6 +455,11 @@ void doRunMode(int key)
   {
     moveMotor(5000, cur_dir);  
   }
+}
+
+int getMotorSpeedDelay(unsigned int percentage)
+{
+  return (int)((float)DefaultMotorSpeed / ((float)percentage / 100.0f));
 }
 
 void setMotorSpeed(unsigned int motorDelay)
@@ -501,14 +521,16 @@ void doRatioMode(int key)
     {
     case UP_KEY:                          // bump the number of steps
       ++gearratioindex;
-      if (gearratioindex > GearRatioMax - 1)  //wrap around if over the max
+      if (gearratioindex > GearRatioCount
+     - 1)  //wrap around if over the max
         gearratioindex = 0;
       motorSteps = (gear_ratio_top_array[gearratioindex] * Microsteps * StepsPerRevolution) / gear_ratio_bottom_array[gearratioindex];
       break;
     case DOWN_KEY:                        // reduce the number of steps
       --gearratioindex;
       if (gearratioindex < 0)
-        gearratioindex = GearRatioMax - 1;    // wrap around if already at the bottom  
+        gearratioindex = GearRatioCount
+       - 1;    // wrap around if already at the bottom  
       motorSteps = (gear_ratio_top_array[gearratioindex] * Microsteps * StepsPerRevolution) / gear_ratio_bottom_array[gearratioindex];
       break;
     case LEFT_KEY:                        //  Left and Right keys do nothing in this mode       
@@ -523,154 +545,12 @@ void doRatioMode(int key)
     }
 }
 
-#pragma region Display routines
 
-void displayMainMenu()
-{
-  lcd.print("Select Mode");
-  lcd.setCursor(0, 1);
-  lcd.print("Mode = ");
-  lcd.setCursor(7, 1);
-  switch (mode_select)
-  {
-  case(stepmode):
-    lcd.print("Step");
-    break;
-  case(tempmode):
-    lcd.print("Temp");
-    break;
-  case(anglemode):
-    lcd.print("Angle");
-    break;
-  case(runmode):
-    lcd.print("Run");
-    break;
-  case(jogmode):
-    lcd.print("Jog");
-    break;
-  case(ratiomode):
-    lcd.print("Ratio");
-    break;
-  }
-}
-
-void displayTempMode()
-{
-  lcd.setCursor(0, 0);
-  lcd.print(" Sink Temp:");
-  lcd.setCursor(11, 0);
-  lcd.print(getTemperature(SinkTempPin));
-  lcd.setCursor(15, 0);
-  lcd.write(temperatureSymbol);
-  lcd.setCursor(0, 1);
-  lcd.print("Motor Temp:");
-  lcd.setCursor(11, 1);
-  lcd.print(getTemperature(MotorTempPin));
-  lcd.setCursor(15, 1);
-  lcd.write(temperatureSymbol);
-}
-
-void displayStepMode()
-{
-  lcd.print("Divisions:");
-  lcd.setCursor(10, 0);
-  lcd.print(num_divisions);
-  lcd.setCursor(0, 1);
-  lcd.print(" Position:");
-  lcd.setCursor(10, 1);
-  lcd.print(cur_pos);
-}
-
-void displayMoveSteps()
-{
-  lcd.print("Steps/Div:");
-  lcd.setCursor(10, 0);
-  lcd.print(stepsperdiv);
-  lcd.setCursor(0, 1);
-  lcd.print("Move ");
-  lcd.setCursor(5, 1);
-  if (cur_dir == CW)
-    lcd.write(byte(1));
-  else
-    lcd.write(byte(2));
-  lcd.setCursor(7, 1);
-  lcd.print("to:");
-  lcd.setCursor(10, 1);
-  lcd.print(cur_pos);
-}
-
-void displayAngleMode()
-{
-  lcd.print("Move ");
-  lcd.setCursor(5, 0);
-  lcd.print((int)cur_angle);
-  lcd.setCursor(8, 0);
-  lcd.print(" degrees");
-}
-
-void displayMoveAngle()
-{
-  lcd.print("Move ");
-  lcd.setCursor(5, 0);
-  if (cur_dir == CW)
-    lcd.write(CW_SYMBOL);
-  else
-    lcd.write(CCW_SYMBOL);
-  lcd.setCursor(12, 0);
-  lcd.print("steps");
-  lcd.setCursor(0, 1);
-  lcd.print("to ");
-  lcd.setCursor(3, 1);
-  lcd.print((int)cur_angle);
-  lcd.setCursor(7, 1);
-  lcd.print("degrees");
-}
-
-void displayRunMode()
-{
-  lcd.print("Continuous");
-  if(run_enabled)
-  {
-    lcd.setCursor(11, 0);  
-    if (cur_dir == CW)
-      lcd.write(CW_SYMBOL);
-    else
-      lcd.write(CCW_SYMBOL);    
-  }
-  lcd.setCursor(0, 1);
-  lcd.print("Speed = ");
-  lcd.setCursor(8, 1);
-  
-  lcd.print((int)motorSpeedDelay);
-}
-
-void displayJogMode()
-{
-  lcd.print("Jog ");
-  lcd.setCursor(0, 1);
-  lcd.print("Steps/jog: ");
-  lcd.setCursor(11, 1);
-  lcd.print(numjogsteps);
-}
-
-void displayRatioMode()
-{
-  lcd.setCursor(0, 0);
-  lcd.print("Ratio =");
-  lcd.setCursor(4, 1);
-  lcd.print(gear_ratio_top_array[gearratioindex]);
-  lcd.setCursor(10, 1);
-  lcd.print(":");
-  lcd.setCursor(11, 1);
-  lcd.print(gear_ratio_bottom_array[gearratioindex]);
-}
-
-#pragma endregion
 
 void displayScreen(int menunum)        // screen displays are here
 {
   Serial.print("Displaying screen for mode ");
-  Serial.println(menunum);
+  Serial.println(menunum);    
   
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -682,8 +562,8 @@ void displayScreen(int menunum)        // screen displays are here
   case tempmode:
     displayTempMode();
     break;
-  case stepmode:
-    displayStepMode();
+  case divisions:
+    displayDivisionsMode();
     break;
   case movesteps:
     displayMoveSteps();
@@ -709,14 +589,7 @@ void displayScreen(int menunum)        // screen displays are here
 }
 
 void moveMotor(unsigned long steps, int dir)
-{
-//  Serial.print("moveMotor(");
-//  Serial.print(steps);
-//  Serial.print(", ");
-//  Serial.print(dir);
-//  Serial.println(")");
-    
-  
+{ 
   if (stepsToGo < 1) // Not executing any moves at present.
   {
     noInterrupts();
@@ -838,44 +711,8 @@ int getTemperature(int device)
   return (int)(temperature / TSampleSize);   // return the average
 }
 
-unsigned long buttonLastRead = 0;
-unsigned long keyLastHandled = 0;
+volatile unsigned int lastKey = NO_KEY;
 
-int getKey()    // routine to return a valid keystroke
-{
-  
-#ifdef SERIAL_INPUT
-  int readKey = lastKey;
-  lastKey = NO_KEY;
-  return readKey;
-#endif // !SERIAL_INPUT
-  unsigned long now = millis();
-
-  int readKey = readButton();
-  
-//  last_r_readings[r_readings_count++] = readKey;
-  
-  if (readKey != lastKey)
-  {
-    if (now - buttonLastRead >= KeyDebounceDelayMs)
-    {
-      buttonLastRead = now;
-      lastKey = readKey;      
-      Serial.print("Read key: ");
-      Serial.println(lastKey);
-      return lastKey;
-    }
-  }
-
-  // Send keypress no more than every KeyRepeatDelayMs.
-  if (now - keyLastHandled >= KeyRepeatDelayMs)
-  {
-    keyLastHandled = now;
-    return lastKey;
-  }
-  
-  return NO_KEY;
-}
 
 void serialEvent()
 {
@@ -908,6 +745,51 @@ void serialEvent()
   }
 }
 
+
+
+
+unsigned long keyLastChanged = 0;
+unsigned long keyLastSent = 0;
+
+int getKey()    // routine to return a valid keystroke
+{ 
+  unsigned long now = millis();
+  int newKey = readButton();
+  if(newKey != lastKey)
+  {
+    keyLastChanged = now;
+    keyLastSent = 0;
+    lastKey = newKey;
+
+    return NO_KEY;
+  }
+
+  if(newKey == NO_KEY)
+  {
+    return NO_KEY;
+  }
+
+  if(now - keyLastChanged > KeyDebounceDelayMs)
+  {
+    if(now - keyLastSent > KeyRepeatDelayMs) 
+    {
+      keyLastSent = now;
+      return sendKey(newKey);
+    } 
+    return NO_KEY;   
+  }
+
+  return NO_KEY;
+}
+
+int sendKey(int key)
+{
+  Serial.print("Sending button: ");
+  Serial.println(key);
+  return key;
+}
+
+
 #define R_NO_KEY 1000
 #define R_RIGHT_KEY 70
 #define R_UP_KEY 150
@@ -930,3 +812,163 @@ int readButton()
   if (key_in < R_SELECT_KEY)  return SELECT_KEY;
 }
 
+#pragma region Display routines
+
+void printIntroScreen()
+{
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0, 0);                 // display flash screen
+  lcd.print("Step Indexer ");
+  lcd.print(version);
+  lcd.setCursor(0, 1);
+  lcd.print("Ratio =");
+  lcd.setCursor(8, 1);
+  lcd.print(gear_ratio_top_array[gearratioindex]);
+  lcd.setCursor(12, 1);
+  lcd.print(":");
+  lcd.print(gear_ratio_bottom_array[gearratioindex]);
+}
+
+void displayMainMenu()
+{
+  lcd.print("Select Mode");
+  lcd.setCursor(0, 1);
+  lcd.print("Mode = ");
+  lcd.setCursor(7, 1);
+  switch (mode_select)
+  {
+  case(divisions):
+    lcd.print("Divisions");
+    break;
+  case(anglemode):
+    lcd.print("Angle");
+    break;
+  case(runmode):
+    lcd.print("Run");
+    break;
+  case(jogmode):
+    lcd.print("Jog");
+    break;
+  case(ratiomode):
+    lcd.print("Ratio");
+    break;
+  case(tempmode):
+    lcd.print("Temp");
+    break;
+  }
+}
+
+void displayDivisionsMode()
+{
+  lcd.print("Divisions:");
+  lcd.setCursor(10, 0);
+  lcd.print(num_divisions);
+  lcd.setCursor(0, 1);
+  lcd.print(" Position:");
+  lcd.setCursor(10, 1);
+  lcd.print(cur_pos);
+}
+
+void displayMoveSteps()
+{
+  lcd.print("Steps/Div:");
+  lcd.setCursor(10, 0);
+  lcd.print(stepsperdiv);
+  lcd.setCursor(0, 1);
+  lcd.print("Move ");
+  lcd.setCursor(5, 1);
+  if (cur_dir == CW)
+    lcd.write(byte(1));
+  else
+    lcd.write(byte(2));
+  lcd.setCursor(7, 1);
+  lcd.print("to:");
+  lcd.setCursor(10, 1);
+  lcd.print(cur_pos);
+}
+
+void displayAngleMode()
+{
+  lcd.print("Move ");
+  lcd.setCursor(5, 0);
+  lcd.print((int)cur_angle);
+  lcd.setCursor(8, 0);
+  lcd.print(" degrees");
+}
+
+void displayMoveAngle()
+{
+  lcd.print("Move ");
+  lcd.setCursor(5, 0);
+  if (cur_dir == CW)
+    lcd.write(CW_SYMBOL);
+  else
+    lcd.write(CCW_SYMBOL);
+  lcd.setCursor(12, 0);
+  lcd.print("steps");
+  lcd.setCursor(0, 1);
+  lcd.print("to ");
+  lcd.setCursor(3, 1);
+  lcd.print((int)cur_angle);
+  lcd.setCursor(7, 1);
+  lcd.print("degrees");
+}
+
+void displayRunMode()
+{
+  lcd.print("Continuous");
+  if(run_enabled)
+  {
+    lcd.setCursor(11, 0);  
+    if (cur_dir == CW)
+      lcd.write(CW_SYMBOL);
+    else
+      lcd.write(CCW_SYMBOL);    
+  }
+  lcd.setCursor(0, 1);
+  lcd.print("Speed = ");
+  lcd.setCursor(8, 1);
+  
+  lcd.print(motorSpeedPercentage);
+  lcd.print("%");
+}
+
+void displayJogMode()
+{
+  lcd.print("Jog ");
+  lcd.setCursor(0, 1);
+  lcd.print("Steps/jog: ");
+  lcd.setCursor(11, 1);
+  lcd.print(numjogsteps);
+}
+
+void displayRatioMode()
+{
+  lcd.setCursor(0, 0);
+  lcd.print("Ratio =");
+  lcd.setCursor(4, 1);
+  lcd.print(gear_ratio_top_array[gearratioindex]);
+  lcd.setCursor(10, 1);
+  lcd.print(":");
+  lcd.setCursor(11, 1);
+  lcd.print(gear_ratio_bottom_array[gearratioindex]);
+}
+
+void displayTempMode()
+{
+  lcd.setCursor(0, 0);
+  lcd.print(" Sink Temp:");
+  lcd.setCursor(11, 0);
+  lcd.print(getTemperature(SinkTempPin));
+  lcd.setCursor(15, 0);
+  lcd.write(temperatureSymbol);
+  lcd.setCursor(0, 1);
+  lcd.print("Motor Temp:");
+  lcd.setCursor(11, 1);
+  lcd.print(getTemperature(MotorTempPin));
+  lcd.setCursor(15, 1);
+  lcd.write(temperatureSymbol);
+}
+
+#pragma endregion
