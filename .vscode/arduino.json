@@ -1,0 +1,6 @@
+{
+    "board": "arduino:avr:uno",
+    "sketch": "StepIndexer.ino",
+    "output": "../build",
+    "port": "COM3"
+}
