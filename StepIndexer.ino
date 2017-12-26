@@ -13,6 +13,7 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 2.2 Frozen   February 2014 by Gary Liming
 2.3 Frozen   September 2014 by Gary Liming
 3.0 Frozen   March 2017 by Tomasz P. Musielak
+3.1 Frozen   December 2017 by Tomasz P. Musielak
 */
 
 //  First, include some files for the LCD display, and its motor
