@@ -43,7 +43,7 @@ and the Sainsmart LCD/keypad sheild with two TMP36 temp sensors
 
 #define GearRatioCount 3          // Number of gear ratios defined
 
-#define AngleIncrement 5        // Set how much a keypress changes the angle setting
+#define AngleIncrement 1        // Set how much a keypress changes the angle setting
 
 #define CW LOW                 // Define direction of rotation
 #define CCW HIGH               // If rotation needs to be reversed, swap HIGH and LOW here
@@ -142,7 +142,7 @@ unsigned long motorSteps; // Total number of motor steps per revolution.
 //   are using for three different devices.  If no gearing, then
 //   define this value to be 1.  GearRatio1 is the default
 //   this is the bottom of the ratio - usually 1, as in 3 to 1, but you may change that here.
-unsigned long gear_ratio_top_array[GearRatioCount]    = { 15, 3, 1 };
+unsigned long gear_ratio_top_array[GearRatioCount]    = {  6, 3, 1 };
 unsigned long gear_ratio_bottom_array[GearRatioCount] = {  1, 1, 1 };
 
 int    gearratioindex = 0;      // the first array element starts with 0 and is the default ration chosen
@@ -275,15 +275,6 @@ void printDebug()
   Serial.print(" stepsExecuted: ");
   Serial.println(stepsExecuted);
 
-//  String s = "Last r: [";
-//  for(int i = 0; i < r_readings_count; i++)
-//  {
-//    s.concat(last_r_readings[i]);
-//    s.concat(",");    
-//  }    
-//  s.concat("]");
-//  Serial.println(s);
-//  r_readings_count = 0;  
   last_debug_displayed = now;
   cycles = 0;
 }
@@ -355,8 +346,6 @@ void doDivisionsMode
       cur_pos = 0;      
     break;
   case SELECT_KEY:
-    cur_pos = 0;       // reset position
-    num_divisions = 1; // reset number of divisions
     stepsToGo = 0;
     disableMotor();
     returnToMenu();
@@ -392,7 +381,6 @@ void doAngleMode(int key)
     moveMotor(stepsperdiv, cur_dir);
     break;
   case SELECT_KEY:
-    cur_angle = 0; // reset angle to default of zero
     disableMotor();
     returnToMenu();
     return;
